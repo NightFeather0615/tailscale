@@ -276,6 +276,10 @@ func (menu *Menu) rebuild() {
 	case ipn.Starting.String():
 		setTooltip("Connecting")
 		setAppIcon(loading)
+	case ipn.NeedsLogin.String():
+		setTooltip("Logged out")
+		setAppIcon(disconnected)
+		menu.connect.SetTitle("Log in")
 	default:
 		setTooltip("Disconnected")
 		setAppIcon(disconnected)
@@ -445,6 +449,13 @@ func (menu *Menu) eventLoop(ctx context.Context) {
 			menu.updateState()
 			menu.rebuild()
 		case <-menu.connect.ClickedCh:
+			if menu.needsLogin() {
+				// The IPN bus watcher opens the login page in a browser.
+				if err := menu.lc.StartLoginInteractive(ctx); err != nil {
+					log.Printf("error logging in: %v", err)
+				}
+				continue
+			}
 			_, err := menu.lc.EditPrefs(ctx, &ipn.MaskedPrefs{
 				Prefs: ipn.Prefs{
 					WantRunning: true,
@@ -497,6 +508,13 @@ func (menu *Menu) eventLoop(ctx context.Context) {
 			systray.Quit()
 		}
 	}
+}
+
+// needsLogin reports whether the backend is waiting for the user to log in.
+func (menu *Menu) needsLogin() bool {
+	menu.mu.Lock()
+	defer menu.mu.Unlock()
+	return menu.status != nil && menu.status.BackendState == ipn.NeedsLogin.String()
 }
 
 // onClick registers a click handler for a menu item.
