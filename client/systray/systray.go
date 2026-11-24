@@ -27,7 +27,6 @@ import (
 	"fyne.io/systray"
 	ico "github.com/Kodeworks/golang-image-ico"
 	"github.com/atotto/clipboard"
-	dbus "github.com/godbus/dbus/v5"
 	"github.com/toqueteos/webbrowser"
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"
@@ -586,22 +585,6 @@ func (menu *Menu) copyTailscaleIP(device *ipnstate.PeerStatus) {
 		log.Printf("clipboard error: %v", err)
 	} else {
 		menu.sendNotification(fmt.Sprintf("Copied Address for %v", name), ip)
-	}
-}
-
-// sendNotification sends a desktop notification with the given title and content.
-func (menu *Menu) sendNotification(title, content string) {
-	conn, err := dbus.SessionBus()
-	if err != nil {
-		log.Printf("dbus: %v", err)
-		return
-	}
-	timeout := 3 * time.Second
-	obj := conn.Object("org.freedesktop.Notifications", "/org/freedesktop/Notifications")
-	call := obj.Call("org.freedesktop.Notifications.Notify", 0, "Tailscale", uint32(0),
-		menu.notificationIcon.Name(), title, content, []string{}, map[string]dbus.Variant{}, int32(timeout.Milliseconds()))
-	if call.Err != nil {
-		log.Printf("dbus: %v", call.Err)
 	}
 }
 
