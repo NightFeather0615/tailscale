@@ -342,6 +342,23 @@ func (menu *Menu) rebuild() {
 		menu.more.Disable()
 	}
 
+	if startAtLoginSupported {
+		enabled := startAtLogin()
+		item := systray.AddMenuItemCheckbox("Start at login", "", enabled)
+		onClick(ctx, item, func(_ context.Context) {
+			if err := setStartAtLogin(!enabled); err != nil {
+				log.Printf("error setting start at login: %v", err)
+				return
+			}
+			enabled = !enabled
+			if enabled {
+				item.Check()
+			} else {
+				item.Uncheck()
+			}
+		})
+	}
+
 	// TODO(#15528): this menu item shouldn't be necessary at all,
 	// but is at least more discoverable than having users switch profiles or exit nodes.
 	menu.rebuildMenu = systray.AddMenuItem("Rebuild menu", "Fix missing menu items")
