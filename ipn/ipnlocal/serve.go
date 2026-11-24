@@ -51,6 +51,7 @@ import (
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/ctxkey"
 	"tailscale.com/util/mak"
+	"tailscale.com/util/pipetcp"
 	"tailscale.com/util/slicesx"
 	"tailscale.com/util/usermetric"
 	"tailscale.com/version"
@@ -808,23 +809,15 @@ func (b *LocalBackend) forwardTCPWithProxyProtocol(conn, backConn net.Conn, prox
 		}
 	}
 
-	errc := make(chan error, 1)
-	go func() {
-		if len(proxyHeader) > 0 {
-			if _, err := backConn.Write(proxyHeader); err != nil {
-				errc <- err
-				backConn.Close()
-				return
-			}
+	if len(proxyHeader) > 0 {
+		if _, err := backConn.Write(proxyHeader); err != nil {
+			backConn.Close()
+			conn.Close()
+			return err
 		}
-		_, err := io.Copy(backConn, conn)
-		errc <- err
-	}()
-	go func() {
-		_, err := io.Copy(conn, backConn)
-		errc <- err
-	}()
-	return <-errc
+	}
+
+	return pipetcp.Pipe(backConn, conn)
 }
 
 func (b *LocalBackend) getServeHandler(r *http.Request) (_ ipn.HTTPHandlerView, at string, ok bool) {
