@@ -321,6 +321,7 @@ func (menu *Menu) rebuild() {
 		menu.self = systray.AddMenuItem("This Device: not connected", "")
 		menu.self.Disable()
 	}
+	menu.rebuildDevicesMenu(ctx)
 	systray.AddSeparator()
 
 	if !menu.readonly {
@@ -578,7 +579,7 @@ func (menu *Menu) copyTailscaleIP(device *ipnstate.PeerStatus) {
 	if device == nil || len(device.TailscaleIPs) == 0 {
 		return
 	}
-	name := strings.Split(device.DNSName, ".")[0]
+	name := deviceName(device)
 	ip := device.TailscaleIPs[0].String()
 	err := clipboard.WriteAll(ip)
 	if err != nil {
@@ -586,6 +587,73 @@ func (menu *Menu) copyTailscaleIP(device *ipnstate.PeerStatus) {
 	} else {
 		menu.sendNotification(fmt.Sprintf("Copied Address for %v", name), ip)
 	}
+}
+
+// rebuildDevicesMenu adds a submenu of the other devices in the tailnet.
+// Clicking a device copies its Tailscale IP address.
+func (menu *Menu) rebuildDevicesMenu(ctx context.Context) {
+	if menu.status == nil || menu.status.Self == nil {
+		return
+	}
+	mine, others := networkDevices(menu.status)
+	if len(mine)+len(others) == 0 {
+		return
+	}
+
+	devices := systray.AddMenuItem("Network Devices", "")
+	time.Sleep(newMenuDelay)
+	addDevices := func(header string, peers []*ipnstate.PeerStatus) {
+		if len(peers) == 0 {
+			return
+		}
+		devices.AddSubMenuItem(header, "").Disable()
+		for _, ps := range peers {
+			title := deviceName(ps)
+			if !ps.Online {
+				title += " (offline)"
+			}
+			item := devices.AddSubMenuItem(title, "Copy IP address")
+			onClick(ctx, item, func(_ context.Context) {
+				menu.copyTailscaleIP(ps)
+			})
+		}
+	}
+	addDevices("My Devices", mine)
+	if len(mine) > 0 && len(others) > 0 {
+		devices.AddSeparator()
+	}
+	addDevices("Other Devices", others)
+}
+
+// networkDevices returns the peers in status to list as devices, sorted by
+// name: those of the same user as this device, then all others.
+// It leaves out location-based exit nodes such as Mullvad's.
+func networkDevices(status *ipnstate.Status) (mine, others []*ipnstate.PeerStatus) {
+	for _, ps := range status.Peer {
+		if ps.Location != nil || len(ps.TailscaleIPs) == 0 {
+			continue
+		}
+		if ps.UserID == status.Self.UserID {
+			mine = append(mine, ps)
+		} else {
+			others = append(others, ps)
+		}
+	}
+	byName := func(a, b *ipnstate.PeerStatus) int {
+		return stringsx.CompareFold(deviceName(a), deviceName(b))
+	}
+	slices.SortFunc(mine, byName)
+	slices.SortFunc(others, byName)
+	return mine, others
+}
+
+// deviceName returns the name to show for a device: the first label of its
+// MagicDNS name, or else its hostname.
+func deviceName(ps *ipnstate.PeerStatus) string {
+	if name, _, _ := strings.Cut(ps.DNSName, "."); name != "" {
+		return name
+	}
+	return ps.HostName
 }
 
 func (menu *Menu) rebuildExitNodeMenu(ctx context.Context) {

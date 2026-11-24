@@ -6,6 +6,8 @@
 package systray
 
 import (
+	"net/netip"
+	"slices"
 	"testing"
 
 	"tailscale.com/ipn/ipnstate"
@@ -143,5 +145,45 @@ func TestRecommendedIsActive(t *testing.T) {
 				t.Errorf("recommendedIsActive; got %v, want %v", isExitNodeActive, tt.isActive)
 			}
 		})
+	}
+}
+
+func TestNetworkDevices(t *testing.T) {
+	t.Parallel()
+
+	const me, other = tailcfg.UserID(1), tailcfg.UserID(2)
+	ip := []netip.Addr{netip.MustParseAddr("100.64.0.1")}
+	peer := func(dnsName, hostName string, user tailcfg.UserID) *ipnstate.PeerStatus {
+		return &ipnstate.PeerStatus{DNSName: dnsName, HostName: hostName, UserID: user, TailscaleIPs: ip}
+	}
+	mullvad := peer("us-nyc-wg-301.mullvad.ts.net.", "us-nyc-wg-301", other)
+	mullvad.Location = &tailcfg.Location{Country: "USA"}
+	noIP := peer("noip.example.ts.net.", "noip", me)
+	noIP.TailscaleIPs = nil
+
+	status := &ipnstate.Status{
+		Self: &ipnstate.PeerStatus{UserID: me},
+		Peer: map[key.NodePublic]*ipnstate.PeerStatus{
+			key.NewNode().Public(): peer("phone.example.ts.net.", "Pixel", me),
+			key.NewNode().Public(): peer("Desktop.example.ts.net.", "desktop", me),
+			key.NewNode().Public(): peer("", "no-dns-name", me),
+			key.NewNode().Public(): peer("server.example.ts.net.", "server", other),
+			key.NewNode().Public(): mullvad,
+			key.NewNode().Public(): noIP,
+		},
+	}
+
+	names := func(peers []*ipnstate.PeerStatus) (names []string) {
+		for _, ps := range peers {
+			names = append(names, deviceName(ps))
+		}
+		return names
+	}
+	mine, others := networkDevices(status)
+	if got, want := names(mine), []string{"Desktop", "no-dns-name", "phone"}; !slices.Equal(got, want) {
+		t.Errorf("my devices = %q; want %q", got, want)
+	}
+	if got, want := names(others), []string{"server"}; !slices.Equal(got, want) {
+		t.Errorf("other devices = %q; want %q", got, want)
 	}
 }
