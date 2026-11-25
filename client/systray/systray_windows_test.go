@@ -5,12 +5,38 @@ package systray
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"fyne.io/systray"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
+
+// TestShowBalloon checks that Windows accepts a notification for the icon
+// that the systray package makes. It shows a real icon and notification on
+// the desktop, so it only runs when asked to.
+func TestShowBalloon(t *testing.T) {
+	if os.Getenv("TS_SYSTRAY_TEST_NOTIFY") == "" {
+		t.Skip("set TS_SYSTRAY_TEST_NOTIFY=1 to show a notification on the desktop")
+	}
+	// The systray package's window and message loop belong to one thread.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	errc := make(chan error, 1)
+	systray.Run(func() {
+		setAppIcon(connected)
+		errc <- showBalloon("Tailscale systray test", "Notifications work.")
+		time.Sleep(5 * time.Second) // long enough to see it
+		systray.Quit()
+	}, nil)
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestStartAtLogin(t *testing.T) {
 	// Don't touch a real installation's value.
