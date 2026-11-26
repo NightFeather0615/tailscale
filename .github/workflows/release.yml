@@ -1,0 +1,192 @@
+name: Release
+
+# Builds the latest stable Tailscale release with this fork's patches and
+# publishes it as a GitHub release.
+#
+# The patches are the commits of the "stack" branch on top of the upstream
+# release tag it sits on. A run moves them onto the release it builds. If
+# they no longer apply, the run fails: rebase "stack" onto the new tag by
+# hand, push it, and run this workflow again.
+
+on:
+  schedule:
+    # Daily. A run that finds nothing new ends within seconds.
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Upstream version to build, such as 1.106.1. Empty means the latest stable release.
+        type: string
+      rebuild:
+        description: Build even if this version already has a release (it gets the next build number).
+        type: boolean
+        default: false
+      publish:
+        description: Publish a release. Turn off to only attach the files to the workflow run.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/tailscale/tailscale.git
+  STACK_BRANCH: stack
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      release: ${{ steps.plan.outputs.release }}
+      build: ${{ steps.plan.outputs.build }}
+    steps:
+      # GitHub turns off the schedule of a repository without activity for
+      # 60 days. Enabling the workflow again resets that clock.
+      - name: Keep the schedule alive
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/enable"
+
+      - name: Decide what to build
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_REBUILD: ${{ inputs.rebuild }}
+        run: |
+          set -euo pipefail
+
+          version="${INPUT_VERSION#v}"
+          if [[ -z "${version}" ]]; then
+            # Stable releases have an even minor version.
+            version=$(git ls-remote --tags --refs "${UPSTREAM}" 'v*' \
+              | sed 's|.*refs/tags/v||' \
+              | grep -E '^[0-9]+\.[0-9]*[02468]\.[0-9]+$' \
+              | sort -V | tail -n 1)
+          fi
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'${version}' is not a version such as 1.106.1"
+            exit 1
+          fi
+
+          # Builds of one upstream version are numbered: v1.106.1-nf.1, -nf.2.
+          last=$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v${version}-nf." \
+            --jq '.[].ref' | sed 's|.*-nf\.||' | sort -n | tail -n 1)
+          build=true
+          if [[ -n "${last}" && "${INPUT_REBUILD}" != "true" ]]; then
+            build=false
+            echo "v${version}-nf.${last} exists; nothing to do."
+          fi
+
+          {
+            echo "version=${version}"
+            echo "release=${version}-nf.$(( ${last:-0} + 1 ))"
+            echo "build=${build}"
+          } >> "${GITHUB_OUTPUT}"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      RELEASE: ${{ needs.plan.outputs.release }}
+    steps:
+      - name: Check out the release tooling
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: ci
+
+      - name: Put the patches on v${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          git init -q src
+          cd src
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git remote add upstream "${UPSTREAM}"
+          # The whole history is under 100 MB, and the version stamp and the
+          # search for the patches' base both need it.
+          git fetch -q --no-tags upstream '+refs/tags/v1.*:refs/tags/v1.*'
+          git fetch -q --no-tags origin \
+            "+refs/heads/${STACK_BRANCH}:refs/remotes/origin/${STACK_BRANCH}"
+
+          base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' \
+            "origin/${STACK_BRANCH}")
+          echo "The patches sit on ${base}:"
+          git log --oneline "${base}..origin/${STACK_BRANCH}"
+
+          git -c advice.detachedHead=false checkout -q "origin/${STACK_BRANCH}"
+          if [[ "$(git rev-parse "${base}^{commit}")" != "$(git rev-parse "v${VERSION}^{commit}")" ]]; then
+            # Fixed committer details make the result the same on every run.
+            export GIT_COMMITTER_NAME="github-actions[bot]"
+            export GIT_COMMITTER_EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
+            if ! git rebase --committer-date-is-author-date --onto "v${VERSION}" "${base}"; then
+              echo "::error::The patches on '${STACK_BRANCH}' do not apply to v${VERSION}. Rebase the branch onto v${VERSION} and run this workflow again."
+              exit 1
+            fi
+          fi
+
+          {
+            echo "STACK_COMMIT=$(git rev-parse "origin/${STACK_BRANCH}")"
+            echo "SOURCE_COMMIT=$(git rev-parse HEAD)"
+          } >> "${GITHUB_ENV}"
+
+      - name: Test
+        working-directory: src
+        run: |
+          ./tool/go test \
+            ./control/controlhttp/... \
+            ./feature/controlwebsocket/... \
+            ./feature/derpwebsocket/... \
+            ./client/systray/... \
+            ./cmd/systray/... \
+            ./cmd/tailscaled/...
+
+      - name: Build
+        run: bash ci/scripts/build.sh src out "${RELEASE}"
+
+      - name: Write the release notes
+        run: |
+          set -euo pipefail
+          {
+            echo "Tailscale [v${VERSION}](https://github.com/tailscale/tailscale/releases/tag/v${VERSION}) with this fork's changes:"
+            echo
+            git -C src log --reverse --format='- %s' "v${VERSION}..HEAD"
+            echo
+            echo "Install or update with the scripts in the [README](https://github.com/${GITHUB_REPOSITORY}#install)."
+            echo
+            echo "Built from upstream \`v${VERSION}\` plus the commits of [\`${STACK_BRANCH}\`](https://github.com/${GITHUB_REPOSITORY}/commits/${STACK_COMMIT}) (\`${STACK_COMMIT:0:12}\`). The \`.patch\` file below holds the same changes; \`git am\` applies it to the upstream tag."
+            echo
+            echo "This is an unofficial build. It is not made, endorsed, or supported by Tailscale Inc."
+          } > notes.md
+          cat notes.md
+
+      - name: Attach the files to this run
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: tailscale-nf_${{ needs.plan.outputs.release }}
+          path: out/
+          if-no-files-found: error
+
+      - name: Publish
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${RELEASE}" out/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "${RELEASE}" \
+            --notes-file notes.md
